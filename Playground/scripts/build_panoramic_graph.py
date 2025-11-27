@@ -162,13 +162,18 @@ def main() -> None:
     A0, A_intra, A_inter = build_adjacencies(Vp, len(objects), V)
 
     # Guardar
-    out_base = args.out_dir / Path(args.npy).stem
-    np.save(out_base.with_suffix("_X.npy"), X)
-    np.save(out_base.with_suffix("_A0.npy"), A0)
-    np.save(out_base.with_suffix("_A_intra.npy"), A_intra)
-    np.save(out_base.with_suffix("_A_inter.npy"), A_inter)
+    stem = Path(args.npy).stem
+    out_X = args.out_dir / f"{stem}_X.npy"
+    out_A0 = args.out_dir / f"{stem}_A0.npy"
+    out_A_intra = args.out_dir / f"{stem}_A_intra.npy"
+    out_A_inter = args.out_dir / f"{stem}_A_inter.npy"
 
-    print(f"Guardado: {out_base.with_suffix('_X.npy')}")
+    np.save(out_X, X)
+    np.save(out_A0, A0)
+    np.save(out_A_intra, A_intra)
+    np.save(out_A_inter, A_inter)
+
+    print(f"Guardado: {out_X}")
     print(f"X shape: {X.shape}  (C, T, V', M)")
     print(f"A0 shape: {A0.shape}")
 

@@ -22,6 +22,8 @@ ft_sync.sh
 workdir/
 train*.sh
 
+graph/
+npy/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

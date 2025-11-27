@@ -69,3 +69,19 @@ El script:
 - `configs/objects.yaml` verificada (centroides por cámara).
 - Script `build_panoramic_graph` (pendiente) para expandir `V'` y generar `J/B/JM/BM`.
 - Evidencia de un forward del feeder usando los tensores generados.
+
+### que se hizo
+- se descargaron los videos
+- se realizo la extraccion de esqueletos para columpioscam3
+- se crearon las ventanas
+- se crearon los grafos del mp-gcn
+
+
+### Notas y recomendaciones rápidas
+
+extract_skeletons.py ahora devuelve keypoints normalizados sobre la imagen completa (0..1), lo cual facilita el matching mano↔objeto.  
+Comprueba la clave exacta de cámara en objects.yaml (puede ser columpioscam3 en minúsculas). Si la clave no coincide, ajusta --camera-id.  
+
+Los grafos generados por build_panoramic_graph.py son prototipos: en el paso "con objetos" deberás revisar/afinar la forma de conectar manos↔objetos (actualmente el prototipo conecta manos a todos los objetos o usa distancia si lo modificamos).  
+
+Falta que al construir el grafo conecte objetos sólo cuando la mano esté cerca (umbral), esto se añade al acript.  
