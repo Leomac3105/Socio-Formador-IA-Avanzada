@@ -3,7 +3,7 @@
 pretrained
 visualization
 docs
-data/
+MP-GCN/data/
 configs
 .DS_Store
 */.DS_Store

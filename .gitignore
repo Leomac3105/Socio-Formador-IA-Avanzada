@@ -3,7 +3,7 @@
 pretrained
 visualization
 docs
-data/
+01-replica-paper/MP-GCN/data/
 configs
 .DS_Store
 */.DS_Store
