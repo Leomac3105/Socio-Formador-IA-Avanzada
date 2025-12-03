@@ -184,6 +184,8 @@ def main():
     p.add_argument('--epochs', type=int, default=3)
     p.add_argument('--batch-size', type=int, default=8)
     p.add_argument('--lr', type=float, default=1e-3)
+    p.add_argument('--num-workers', type=int, default=4, help='num DataLoader workers')
+    p.add_argument('--resume', type=str, default=None, help='path to checkpoint to resume from')
     p.add_argument('--device', default='cuda' if torch.cuda.is_available() else 'cpu')
     args = p.parse_args()
 
@@ -198,8 +200,8 @@ def main():
     # dataset + dataloaders
     train_ds = GraphDataset(train_df, graph_dir, le)
     val_ds = GraphDataset(val_df, graph_dir, le)
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=4, collate_fn=collate_fn)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=2, collate_fn=collate_fn)
+    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=collate_fn)
+    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=max(1, args.num_workers//2), collate_fn=collate_fn)
 
     # build A from first training sample to create model (assumes consistent graph sizes)
     sample_fname = train_df.iloc[0]['file']
@@ -246,14 +248,41 @@ def main():
 
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
 
+    # resume support
+    start_epoch = 1
     best_val = 0.0
+    if args.resume:
+        ckpt_path = Path(args.resume)
+        if ckpt_path.exists():
+            print('Resuming from checkpoint:', ckpt_path)
+            try:
+                ckpt = torch.load(str(ckpt_path), map_location='cpu')
+            except Exception as e:
+                # try loading with weights_only=False for newer PyTorch security
+                try:
+                    ckpt = torch.load(str(ckpt_path), map_location='cpu', weights_only=False)
+                except Exception as e2:
+                    print('Error loading checkpoint:', e2)
+                    ckpt = None
+            if ckpt is not None:
+                try:
+                    if 'model_state' in ckpt:
+                        model.load_state_dict(ckpt['model_state'])
+                    else:
+                        # checkpoint might be just a state_dict
+                        model.load_state_dict(ckpt)
+                    start_epoch = int(ckpt.get('epoch', 0)) + 1 if isinstance(ckpt, dict) else 1
+                except Exception as e:
+                    print('Warning: could not fully load model_state:', e)
+        else:
+            print('Warning: resume checkpoint not found:', ckpt_path)
 
     # prepare metrics logging
     metrics = []
     metrics_out = str(Path(args.out).with_suffix('')) + '.metrics.csv'
     confmat_out = str(Path(args.out).with_suffix('')) + '.confmat.png'
 
-    for epoch in range(1, args.epochs + 1):
+    for epoch in range(start_epoch, args.epochs + 1):
         print(f'Epoch {epoch}/{args.epochs}')
         train_loss = train_epoch(model, train_loader, opt, device, class_weights_tensor=class_weights_tensor)
         val_acc, y_true, y_pred = eval_epoch(model, val_loader, device)
