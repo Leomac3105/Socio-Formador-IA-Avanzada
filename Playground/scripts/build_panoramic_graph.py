@@ -53,7 +53,7 @@ def ensure_window(arr: np.ndarray) -> np.ndarray:
     raise ValueError("Input .npy debe tener shape (T,K,17,2) o (N,T,K,17,2)")
 
 
-def build_streams(window: np.ndarray, objects: list[tuple[float, float]]) -> tuple[np.ndarray, np.ndarray]:
+def build_streams(window: np.ndarray, objects: list[tuple[float, float]], pelvis_per_person: np.ndarray | None = None, torso_per_person: np.ndarray | None = None, distance_threshold: float | None = None) -> tuple[np.ndarray, np.ndarray]:
     # window: (T, K, 17, 2)
     T, K, V, _ = window.shape
     n_obj = len(objects)
@@ -73,10 +73,35 @@ def build_streams(window: np.ndarray, objects: list[tuple[float, float]]) -> tup
             J[1, :, v, m] = coords[:, 1]
 
     # Objetos: replicar centroides para todos los frames y personas
+    eps = 1e-8
+    # temporarily store object positions per person per frame (T, M)
+    obj_pos = np.zeros((n_obj, 2, T, M), dtype=np.float32)
     for i_obj, (cx, cy) in enumerate(objects):
         v_idx = V + i_obj
-        J[0, :, v_idx, :] = cx
-        J[1, :, v_idx, :] = cy
+        if pelvis_per_person is not None and torso_per_person is not None and pelvis_per_person.shape[0] == M:
+            # transform object centroid from image-normalized coords into person-centered, torso-scaled frame
+            for m in range(M):
+                px, py = float(pelvis_per_person[m, 0]), float(pelvis_per_person[m, 1])
+                # Avoid extremely small torso scale which inflates transformed coords.
+                # Use a conservative minimum torso scale (in torso-normalized units).
+                min_torso = 0.02
+                try:
+                    s_raw = float(torso_per_person[m])
+                except Exception:
+                    s_raw = eps
+                s = s_raw if s_raw >= min_torso else min_torso
+                valx = (cx - px) / s
+                valy = (cy - py) / s
+                J[0, :, v_idx, m] = valx
+                J[1, :, v_idx, m] = valy
+                obj_pos[i_obj, 0, :, m] = valx
+                obj_pos[i_obj, 1, :, m] = valy
+        else:
+            # no metadata: replicate raw image-normalized centroid (fallback)
+            J[0, :, v_idx, :] = cx
+            J[1, :, v_idx, :] = cy
+            obj_pos[i_obj, 0, :, :] = cx
+            obj_pos[i_obj, 1, :, :] = cy
 
     # Bones: simple vector respecto al centro del torso (pelvis mean) — alternativa a árbol kinematic
     pelvis = np.zeros((T, M, 2), dtype=np.float32)
@@ -96,11 +121,38 @@ def build_streams(window: np.ndarray, objects: list[tuple[float, float]]) -> tup
             vec = coords - pelvis[:, m, :]
             B[0, :, v, m] = vec[:, 0]
             B[1, :, v, m] = vec[:, 1]
-        # objetos: vector objeto - pelvis
+        # objetos: vector objeto - pelvis (or transformed values stored in obj_pos)
         for i_obj, (cx, cy) in enumerate(objects):
             v_idx = V + i_obj
-            B[0, :, v_idx, m] = cx - pelvis[:, m, 0]
-            B[1, :, v_idx, m] = cy - pelvis[:, m, 1]
+            # obj_pos shape (n_obj,2,T,M)
+            B[0, :, v_idx, m] = obj_pos[i_obj, 0, :, m] - 0.0
+            B[1, :, v_idx, m] = obj_pos[i_obj, 1, :, m] - 0.0
+
+    # If requested, compute proximity mask and zero-out object channels for non-interacting persons
+    if distance_threshold is not None:
+        # compute per-person-object min distance to nearest hand across frames
+        interaction = np.zeros((n_obj, M), dtype=bool)
+        for i_obj in range(n_obj):
+            for m in range(M):
+                # distance to each hand index over frames
+                min_dist = float('inf')
+                for h in HAND_INDICES:
+                    if h >= V:
+                        continue
+                    # window[:,m,h,:] is (T,2) in person-centered units
+                    hand = window[:, m, h, :]
+                    obj = obj_pos[i_obj, :, :, m].T  # shape (T,2)
+                    d = np.linalg.norm(hand - obj, axis=1)
+                    min_dist = min(min_dist, float(np.min(d)))
+                if min_dist <= distance_threshold:
+                    interaction[i_obj, m] = True
+        # zero-out object entries for (i_obj,m) where interaction False
+        for i_obj in range(n_obj):
+            v_idx = V + i_obj
+            for m in range(M):
+                if not interaction[i_obj, m]:
+                    J[:, :, v_idx, m] = 0.0
+                    B[:, :, v_idx, m] = 0.0
 
     # JM / BM: diferencias temporales (t -> t+1), último frame 0
     JM = np.zeros_like(J)
@@ -149,6 +201,7 @@ def main() -> None:
     parser.add_argument("--camera-id", type=str, required=True, help="ID de cámara (clave en objects.yaml)")
     parser.add_argument("--objects", type=Path, default=Path("configs/objects.yaml"), help="Ruta a objects.yaml")
     parser.add_argument("--out-dir", type=Path, default=Path("data/graph"), help="Directorio de salida")
+    parser.add_argument("--distance-threshold", type=float, default=0.25, help="Umbral de distancia (en unidades torso-scale) para considerar que una persona usa un objeto")
     args = parser.parse_args()
 
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -158,7 +211,22 @@ def main() -> None:
     T, K, V, _ = window.shape
 
     objects = load_objects(args.objects, args.camera_id)
-    X, Vp = build_streams(window, objects)
+    # Attempt to locate metadata file alongside the .npy
+    stem = Path(args.npy).stem
+    meta_path = Path(args.npy).with_suffix("")
+    meta_path = meta_path.parent / f"{stem}_meta.npz"
+    pelvis_meta = None
+    torso_meta = None
+    if meta_path.exists():
+        try:
+            m = np.load(meta_path)
+            pelvis_meta = m["pelvis"] if "pelvis" in m else None
+            torso_meta = m["torso"] if "torso" in m else None
+            print(f"Cargando metadata desde {meta_path}")
+        except Exception as e:
+            print(f"No se pudo leer metadata {meta_path}: {e}")
+
+    X, Vp = build_streams(window, objects, pelvis_per_person=pelvis_meta, torso_per_person=torso_meta, distance_threshold=args.distance_threshold)
     A0, A_intra, A_inter = build_adjacencies(Vp, len(objects), V)
 
     # Guardar

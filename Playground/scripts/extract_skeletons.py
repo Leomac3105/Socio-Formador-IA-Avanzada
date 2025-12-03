@@ -166,12 +166,20 @@ def extract_skeletons(
 
         for track in tracks:
             keypoints = run_pose(frame, track.bbox, pose_estimator)
+            # keypoints: image-normalized coords (0..1)
+            pelvis_img = (keypoints[11] + keypoints[12]) / 2.0
+            shoulders_center = (keypoints[5] + keypoints[6]) / 2.0
+            torso_len = float(np.linalg.norm(shoulders_center - pelvis_img) if not np.allclose(shoulders_center, pelvis_img) else 0.0)
             kps_norm = normalize_skeleton(keypoints)
             records.append(
                 {
                     "local_frame": frame_idx,
                     "track_id": track.track_id,
                     "keypoints": kps_norm,
+                    # store raw image coords and simple metadata to enable later transforms
+                    "raw_keypoints": keypoints,
+                    "pelvis_image": pelvis_img,
+                    "torso_scale": torso_len,
                 }
             )
     return records
@@ -181,10 +189,10 @@ def build_windows(
     skeletons: Sequence[dict],
     window: int = 48,
     k_max: int = 4,
-) -> np.ndarray:
+) -> tuple[np.ndarray, List[dict]]:
     """Agrupa esqueletos normalizados en tensores [N,T,K_max,17,2]."""
     if not skeletons:
-        return np.empty((0, window, k_max, 17, 2), dtype=np.float32)
+        return np.empty((0, window, k_max, 17, 2), dtype=np.float32), []
 
     by_track: dict[int, List[dict]] = {}
     for record in skeletons:
@@ -198,6 +206,7 @@ def build_windows(
 
     stride = window // 2
     windows: List[np.ndarray] = []
+    metas: List[dict] = []
 
     frame_range = range(start_frame, end_frame + 1)
     for start in frame_range:
@@ -207,6 +216,10 @@ def build_windows(
 
         tensor = np.zeros((window, k_max, 17, 2), dtype=np.float32)
         track_scores: List[Tuple[int, int]] = []
+        # meta containers per slot
+        slot_pelvis = np.zeros((k_max, 2), dtype=np.float32)
+        slot_torso = np.zeros((k_max,), dtype=np.float32)
+        slot_track_ids: List[int] = [-1] * k_max
         for tid, records in by_track.items():
             count = sum(start <= rec["local_frame"] < stop for rec in records)
             if count:
@@ -222,11 +235,29 @@ def build_windows(
             for step, frame_id in enumerate(range(start, stop)):
                 if frame_id in frame_to_kps:
                     tensor[step, slot] = frame_to_kps[frame_id]
+            # compute avg pelvis and torso for this track inside the window
+            frames_for_track = [rec for rec in by_track[tid] if start <= rec["local_frame"] < stop]
+            if frames_for_track:
+                pelvis_vals = np.array([rec.get("pelvis_image", np.array([0.0, 0.0])) for rec in frames_for_track], dtype=np.float32)
+                torso_vals = np.array([rec.get("torso_scale", 0.0) for rec in frames_for_track], dtype=np.float32)
+                slot_pelvis[slot] = pelvis_vals.mean(axis=0)
+                slot_torso[slot] = float(max(torso_vals.mean(), 1e-6))
+            else:
+                slot_pelvis[slot] = np.array([0.0, 0.0], dtype=np.float32)
+                slot_torso[slot] = 1.0
+            slot_track_ids[slot] = tid
 
         windows.append(tensor)
+        # assemble meta for this window
+        meta = {
+            "pelvis": slot_pelvis.astype(np.float32),
+            "torso": slot_torso.astype(np.float32),
+            "track_ids": np.array(slot_track_ids, dtype=np.int32),
+        }
+        metas.append(meta)
         start += stride - 1  # compensate for loop increment
 
-    return np.stack(windows, axis=0) if windows else np.empty((0, window, k_max, 17, 2), dtype=np.float32)
+    return (np.stack(windows, axis=0) if windows else np.empty((0, window, k_max, 17, 2), dtype=np.float32)), metas
 
 
 def process_scene(
@@ -253,12 +284,16 @@ def process_scene(
         return 0
 
     skeletons = extract_skeletons(frames, model, pose_estimator)
-    windows = build_windows(skeletons, window=window, k_max=k_max)
+    windows, metas = build_windows(skeletons, window=window, k_max=k_max)
 
     saved = 0
     for idx, tensor in enumerate(windows):
         out_path = output_dir / f"{video_id}_win{idx:03d}.npy"
         np.save(out_path, tensor.astype(np.float32))
+        # save metadata per ventana: pelvis (K,2), torso (K,), track_ids (K,)
+        meta = metas[idx] if idx < len(metas) else {"pelvis": np.zeros((k_max,2),dtype=np.float32), "torso": np.ones((k_max,),dtype=np.float32), "track_ids": np.full((k_max,), -1, dtype=np.int32)}
+        meta_path = output_dir / f"{video_id}_win{idx:03d}_meta.npz"
+        np.savez_compressed(meta_path, pelvis=meta["pelvis"], torso=meta["torso"], track_ids=meta["track_ids"]) 
         saved += 1
 
     logging.info("Procesado %s -> %d ventanas", video_id, saved)

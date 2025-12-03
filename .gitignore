@@ -24,6 +24,7 @@ train*.sh
 
 graph/
 npy/
+npy_filled/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
