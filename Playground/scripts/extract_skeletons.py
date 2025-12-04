@@ -1,53 +1,41 @@
 #!/usr/bin/env python3
-"""Extrae esqueletos normalizados y ventanas [T,K_max,17,2] desde videos filtrados."""
-from __future__ import annotations
+"""
+Extrae esqueletos normalizados y ventanas limpias [T,K_max,17,2].
 
+"""
+
+from __future__ import annotations
 import argparse
 import logging
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, List, Sequence, Tuple
-
-try:
-    import cv2
-except ImportError as exc:
-    raise ImportError(
-        "OpenCV (cv2) no está instalado. Ejecuta `pip install opencv-python` "
-        "en el mismo entorno antes de correr este script."
-    ) from exc
-
-try:
-    import mediapipe as mp
-except ImportError as exc:
-    raise ImportError(
-        "MediaPipe no está instalado. Ejecuta `pip install mediapipe` en el entorno activo."
-    ) from exc
-
+from typing import List, Sequence, Tuple
 import numpy as np
 import pandas as pd
-
-try:
-    from ultralytics import YOLO
-except ImportError as exc:
-    raise ImportError(
-        "No se encontró Ultralytics YOLO. Instálalo con `pip install ultralytics`."
-    ) from exc
+import cv2
+import mediapipe as mp
+from ultralytics import YOLO
 
 
+# ---------------------------------------------------------
+# CONFIG LOGGING
+# ---------------------------------------------------------
 logging.basicConfig(
     level=logging.INFO,
     format="[%(levelname)s] %(message)s",
 )
 
 
+# ---------------------------------------------------------
+#   VIDEO LOADER (12 FPS)
+# ---------------------------------------------------------
 def load_video_12fps(video_path: Path, target_fps: int = 12) -> List[np.ndarray]:
-    """Carga frames muestreados a ~12 FPS para acelerar la inferencia."""
     cap = cv2.VideoCapture(str(video_path))
     fps = cap.get(cv2.CAP_PROP_FPS)
     fps = fps if fps > 0 else 30
     frame_step = max(int(round(fps / target_fps)), 1)
 
-    frames: List[np.ndarray] = []
+    frames = []
     idx = 0
     while True:
         ret, frame = cap.read()
@@ -61,20 +49,27 @@ def load_video_12fps(video_path: Path, target_fps: int = 12) -> List[np.ndarray]
     return frames
 
 
+# ---------------------------------------------------------
+# YOLO DETECTION
+# ---------------------------------------------------------
 def run_yolo(frame: np.ndarray, model: YOLO) -> List[Tuple[float, float, float, float]]:
-    """Detecta personas en un frame usando YOLOv8."""
-    detections: List[Tuple[float, float, float, float]] = []
+    detections = []
     results = model(frame, verbose=False)
+
     for result in results:
         for box in result.boxes:
             cls = int(box.cls[0])
-            if cls != 0:  # clase 0 = persona
+            if cls != 0:
                 continue
             x1, y1, x2, y2 = box.xyxy[0].tolist()
             detections.append((x1, y1, x2, y2))
+
     return detections
 
 
+# ---------------------------------------------------------
+# SIMPLE TRACKER (estable para ventanas cortas)
+# ---------------------------------------------------------
 @dataclass
 class Track:
     track_id: int
@@ -82,38 +77,28 @@ class Track:
 
 
 class SimpleTracker:
-    """Tracker mínimo para mantener IDs consistentes en ventanas cortas."""
-
-    def __init__(self) -> None:
+    def __init__(self):
         self.next_id = 0
 
-    def update(self, detections: Sequence[Tuple[float, float, float, float]]) -> List[Track]:
-        tracks: List[Track] = []
+    def update(self, detections):
+        tracks = []
         for det in detections:
             tracks.append(Track(self.next_id, det))
             self.next_id += 1
         return tracks
 
 
-def run_pose(frame: np.ndarray, bbox: Tuple[float, float, float, float], pose_estimator) -> np.ndarray:
-    """Ejecuta MediaPipe Pose sobre un recorte y devuelve 17 keypoints 2D normalizados (0..1)
-    respecto a la imagen completa.
-
-    MediaPipe devuelve landmarks normalizados respecto al `crop` (0..1). Aquí remapeamos cada
-    landmark al sistema de coordenadas de la imagen completa usando el `bbox` (x1,y1,x2,y2).
-    Esto facilita el emparejamiento con centroides de objetos normalizados en `objects.yaml`.
-    """
+# ---------------------------------------------------------
+# POSE ESTIMATION (MediaPipe) con remapeo
+# ---------------------------------------------------------
+def run_pose(frame, bbox, pose_estimator):
     x1, y1, x2, y2 = map(int, bbox)
-    h_img, w_img = frame.shape[:2]
+    h, w = frame.shape[:2]
 
-    # Clamp bbox dentro de la imagen
-    x1 = max(0, min(x1, w_img - 1))
-    x2 = max(0, min(x2, w_img))
-    y1 = max(0, min(y1, h_img - 1))
-    y2 = max(0, min(y2, h_img))
-
-    crop_w = max(1, x2 - x1)
-    crop_h = max(1, y2 - y1)
+    x1 = max(0, min(x1, w - 1))
+    x2 = max(0, min(x2, w))
+    y1 = max(0, min(y1, h - 1))
+    y2 = max(0, min(y2, h))
 
     crop = frame[y1:y2, x1:x2]
     if crop.size == 0:
@@ -121,226 +106,228 @@ def run_pose(frame: np.ndarray, bbox: Tuple[float, float, float, float], pose_es
 
     crop_rgb = cv2.cvtColor(crop, cv2.COLOR_BGR2RGB)
     res = pose_estimator.process(crop_rgb)
+
     keypoints = np.zeros((17, 2), dtype=np.float32)
+    crop_h, crop_w = crop.shape[:2]
 
     if res.pose_landmarks:
-        for idx, lm in enumerate(res.pose_landmarks.landmark[:17]):
-            # lm.x/lm.y are normalized w.r.t. crop. Convert to image pixel coords then normalize by image size.
-            x_img = lm.x * crop_w + x1
-            y_img = lm.y * crop_h + y1
-            # normalize to 0..1 over full image
-            keypoints[idx, 0] = float(x_img / w_img)
-            keypoints[idx, 1] = float(y_img / h_img)
-
-            # clamp to [0,1]
-            keypoints[idx, 0] = min(max(keypoints[idx, 0], 0.0), 1.0)
-            keypoints[idx, 1] = min(max(keypoints[idx, 1], 0.0), 1.0)
+        for i, lm in enumerate(res.pose_landmarks.landmark[:17]):
+            xp = lm.x * crop_w + x1
+            yp = lm.y * crop_h + y1
+            keypoints[i, 0] = np.clip(xp / w, 0, 1)
+            keypoints[i, 1] = np.clip(yp / h, 0, 1)
 
     return keypoints
 
 
-def normalize_skeleton(keypoints: np.ndarray, eps: float = 1e-6) -> np.ndarray:
-    """Traslada al origen (pelvis) y escala usando el torso."""
-    kps = keypoints.astype(np.float32).copy()
-    pelvis = (kps[11] + kps[12]) / 2
-    kps -= pelvis
+# ---------------------------------------------------------
+# NORMALIZACIÓN PELVIS → ORIGEN y ESCALA TORSO
+# ---------------------------------------------------------
+def normalize_skeleton(kps, eps=1e-6):
+    k = kps.copy()
+    pelvis = (k[11] + k[12]) / 2
+    k -= pelvis
+    shoulders = (k[5] + k[6]) / 2
+    torso = np.linalg.norm(shoulders) + eps
+    k /= torso
+    return k.astype(np.float32)
 
-    shoulders_center = (kps[5] + kps[6]) / 2
-    torso_len = np.linalg.norm(shoulders_center) + eps
-    kps /= torso_len
-    return kps
 
-
-def extract_skeletons(
-    frames: Sequence[np.ndarray],
-    model: YOLO,
-    pose_estimator,
-) -> List[dict]:
-    """Genera lista de esqueletos detectados por frame."""
+# ---------------------------------------------------------
+#   EXTRACT SKELETONS (core)
+# ---------------------------------------------------------
+def extract_skeletons(frames, model, pose_estimator):
     tracker = SimpleTracker()
-    records: List[dict] = []
+    records = []
 
-    for frame_idx, frame in enumerate(frames):
+    for fidx, frame in enumerate(frames):
         detections = run_yolo(frame, model)
         tracks = tracker.update(detections)
 
-        for track in tracks:
-            keypoints = run_pose(frame, track.bbox, pose_estimator)
-            # keypoints: image-normalized coords (0..1)
-            pelvis_img = (keypoints[11] + keypoints[12]) / 2.0
-            shoulders_center = (keypoints[5] + keypoints[6]) / 2.0
-            torso_len = float(np.linalg.norm(shoulders_center - pelvis_img) if not np.allclose(shoulders_center, pelvis_img) else 0.0)
-            kps_norm = normalize_skeleton(keypoints)
+        for tr in tracks:
+            raw = run_pose(frame, tr.bbox, pose_estimator)
+            pelvis_img = (raw[11] + raw[12]) / 2
+            shoulders = (raw[5] + raw[6]) / 2
+            torso_len = float(np.linalg.norm(shoulders - pelvis_img))
+            norm_kps = normalize_skeleton(raw)
+
             records.append(
                 {
-                    "local_frame": frame_idx,
-                    "track_id": track.track_id,
-                    "keypoints": kps_norm,
-                    # store raw image coords and simple metadata to enable later transforms
-                    "raw_keypoints": keypoints,
+                    "local_frame": fidx,
+                    "track_id": tr.track_id,
+                    "keypoints": norm_kps,
+                    "raw_keypoints": raw,
                     "pelvis_image": pelvis_img,
-                    "torso_scale": torso_len,
+                    "torso_scale": max(torso_len, 1e-6),
                 }
             )
+
     return records
 
 
-def build_windows(
-    skeletons: Sequence[dict],
-    window: int = 48,
-    k_max: int = 4,
-) -> tuple[np.ndarray, List[dict]]:
-    """Agrupa esqueletos normalizados en tensores [N,T,K_max,17,2]."""
-    if not skeletons:
+# ---------------------------------------------------------
+# WINDOW BUILDER (corregido)
+# ---------------------------------------------------------
+def build_windows(skeletons, window=48, k_max=4, min_frame_frac=0.25):
+
+    if len(skeletons) == 0:
         return np.empty((0, window, k_max, 17, 2), dtype=np.float32), []
 
-    by_track: dict[int, List[dict]] = {}
-    for record in skeletons:
-        by_track.setdefault(record["track_id"], []).append(record)
-    for records in by_track.values():
-        records.sort(key=lambda x: x["local_frame"])
+    by_track = {}
+    for rec in skeletons:
+        by_track.setdefault(rec["track_id"], []).append(rec)
 
-    frame_indices = sorted(record["local_frame"] for record in skeletons)
-    start_frame = frame_indices[0]
-    end_frame = frame_indices[-1]
+    for v in by_track.values():
+        v.sort(key=lambda x: x["local_frame"])
+
+    frames = sorted(rec["local_frame"] for rec in skeletons)
+    start_f = frames[0]
+    end_f = frames[-1]
 
     stride = window // 2
-    windows: List[np.ndarray] = []
-    metas: List[dict] = []
+    min_frames = max(1, int(window * min_frame_frac))
 
-    frame_range = range(start_frame, end_frame + 1)
-    for start in frame_range:
+    all_tensors = []
+    metas_all = []
+
+    for start in range(start_f, end_f + 1):
         stop = start + window
-        if stop - 1 > end_frame:
+        if stop > end_f + 1:
             break
 
         tensor = np.zeros((window, k_max, 17, 2), dtype=np.float32)
-        track_scores: List[Tuple[int, int]] = []
-        # meta containers per slot
-        slot_pelvis = np.zeros((k_max, 2), dtype=np.float32)
-        slot_torso = np.zeros((k_max,), dtype=np.float32)
-        slot_track_ids: List[int] = [-1] * k_max
-        for tid, records in by_track.items():
-            count = sum(start <= rec["local_frame"] < stop for rec in records)
-            if count:
-                track_scores.append((count, tid))
+        pelvis_slots = np.zeros((k_max, 2), dtype=np.float32)
+        torso_slots = np.ones((k_max,), dtype=np.float32)
+        slots_ids = [-1] * k_max
 
-        track_scores.sort(reverse=True)
-        selected = [tid for _, tid in track_scores[:k_max]]
+        # seleccionar tracks más presentes
+        counts = []
+        for tid, recs in by_track.items():
+            c = sum(start <= r["local_frame"] < stop for r in recs)
+            if c > 0:
+                counts.append((c, tid))
+
+        counts.sort(reverse=True)
+        selected = [tid for _, tid in counts[:k_max]]
 
         for slot, tid in enumerate(selected):
-            frame_to_kps = {
-                rec["local_frame"]: rec["keypoints"] for rec in by_track[tid]
+            recs = by_track[tid]
+            frames_map = {r["local_frame"]: r for r in recs}
+
+            present = []
+            for tstep, fr in enumerate(range(start, stop)):
+                if fr in frames_map:
+                    tensor[tstep, slot] = frames_map[fr]["keypoints"]
+                    present.append(tstep)
+
+            # stats
+            used = [r for r in recs if start <= r["local_frame"] < stop]
+            if used:
+                pelvis_slots[slot] = np.mean([u["pelvis_image"] for u in used], axis=0)
+                torso_slots[slot] = float(
+                    max(np.mean([u["torso_scale"] for u in used]), 1e-6)
+                )
+            slots_ids[slot] = tid
+
+            # rellenado si faltan frames
+            if len(present) == 0:
+                continue
+
+            if len(present) < min_frames:
+                present = np.array(present)
+                full = np.arange(window)
+                vals = tensor[:, slot]
+                available = vals[present]
+                dists = np.abs(full[:, None] - present[None, :])
+                nearest = dists.argmin(axis=1)
+                tensor[:, slot] = available[nearest]
+
+        all_tensors.append(tensor)
+        metas_all.append(
+            {
+                "pelvis": pelvis_slots.astype(np.float32),
+                "torso": torso_slots.astype(np.float32),
+                "track_ids": np.array(slots_ids, dtype=np.int32),
             }
-            for step, frame_id in enumerate(range(start, stop)):
-                if frame_id in frame_to_kps:
-                    tensor[step, slot] = frame_to_kps[frame_id]
-            # compute avg pelvis and torso for this track inside the window
-            frames_for_track = [rec for rec in by_track[tid] if start <= rec["local_frame"] < stop]
-            if frames_for_track:
-                pelvis_vals = np.array([rec.get("pelvis_image", np.array([0.0, 0.0])) for rec in frames_for_track], dtype=np.float32)
-                torso_vals = np.array([rec.get("torso_scale", 0.0) for rec in frames_for_track], dtype=np.float32)
-                slot_pelvis[slot] = pelvis_vals.mean(axis=0)
-                slot_torso[slot] = float(max(torso_vals.mean(), 1e-6))
-            else:
-                slot_pelvis[slot] = np.array([0.0, 0.0], dtype=np.float32)
-                slot_torso[slot] = 1.0
-            slot_track_ids[slot] = tid
+        )
 
-        windows.append(tensor)
-        # assemble meta for this window
-        meta = {
-            "pelvis": slot_pelvis.astype(np.float32),
-            "torso": slot_torso.astype(np.float32),
-            "track_ids": np.array(slot_track_ids, dtype=np.int32),
-        }
-        metas.append(meta)
-        start += stride - 1  # compensate for loop increment
+    if len(all_tensors) == 0:
+        return np.empty((0, window, k_max, 17, 2), dtype=np.float32), metas_all
 
-    return (np.stack(windows, axis=0) if windows else np.empty((0, window, k_max, 17, 2), dtype=np.float32)), metas
+    return np.stack(all_tensors, axis=0), metas_all
 
 
-def process_scene(
-    row: pd.Series,
-    downloads_dir: Path,
-    output_dir: Path,
-    model: YOLO,
-    pose_estimator,
-    window: int,
-    k_max: int,
-) -> int:
-    """Procesa una fila de videos.csv y guarda npy por ventana."""
+# ---------------------------------------------------------
+# PROCESS SCENE
+# ---------------------------------------------------------
+def process_scene(row, downloads, outdir, model, pose, window, k_max, min_frame_frac):
     video_id = row["video_id"]
-    blob_name = Path(row["blob_path"]).name
-    video_path = downloads_dir / blob_name
+    blob = Path(row["blob_path"]).name
+    vid_path = downloads / blob
 
-    if not video_path.exists():
-        logging.warning("Video no encontrado: %s", video_path)
+    if not vid_path.exists():
+        logging.warning("Video no encontrado %s", vid_path)
         return 0
 
-    frames = load_video_12fps(video_path)
-    if not frames:
-        logging.warning("Video sin frames válidos: %s", video_path)
+    frames = load_video_12fps(vid_path)
+    if len(frames) == 0:
         return 0
 
-    skeletons = extract_skeletons(frames, model, pose_estimator)
-    windows, metas = build_windows(skeletons, window=window, k_max=k_max)
+    sk = extract_skeletons(frames, model, pose)
+    win, meta = build_windows(sk, window=window, k_max=k_max, min_frame_frac=min_frame_frac)
 
     saved = 0
-    for idx, tensor in enumerate(windows):
-        out_path = output_dir / f"{video_id}_win{idx:03d}.npy"
-        np.save(out_path, tensor.astype(np.float32))
-        # save metadata per ventana: pelvis (K,2), torso (K,), track_ids (K,)
-        meta = metas[idx] if idx < len(metas) else {"pelvis": np.zeros((k_max,2),dtype=np.float32), "torso": np.ones((k_max,),dtype=np.float32), "track_ids": np.full((k_max,), -1, dtype=np.int32)}
-        meta_path = output_dir / f"{video_id}_win{idx:03d}_meta.npz"
-        np.savez_compressed(meta_path, pelvis=meta["pelvis"], torso=meta["torso"], track_ids=meta["track_ids"]) 
+    for i, tensor in enumerate(win):
+        np.save(outdir / f"{video_id}_win{i:03d}.npy", tensor.astype(np.float32))
+        np.savez_compressed(
+            outdir / f"{video_id}_win{i:03d}_meta.npz",
+            pelvis=meta[i]["pelvis"],
+            torso=meta[i]["torso"],
+            track_ids=meta[i]["track_ids"],
+        )
         saved += 1
 
-    logging.info("Procesado %s -> %d ventanas", video_id, saved)
     return saved
 
 
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Extrae tensores [T,K_max,17,2] desde videos filtrados.")
-    parser.add_argument("--videos-csv", type=Path, default=Path("data/videos.csv"))
-    parser.add_argument("--downloads-dir", type=Path, default=Path("Downloads"))
-    parser.add_argument("--output-dir", type=Path, default=Path("data/npy"))
-    parser.add_argument("--yolo-weights", type=Path, default=Path("yolov8n.pt"))
-    parser.add_argument("--window", type=int, default=48, help="Número de frames por ventana")
-    parser.add_argument("--k-max", type=int, default=4, help="Máximo de personas por ventana")
-    return parser.parse_args()
+# ---------------------------------------------------------
+# MAIN
+# ---------------------------------------------------------
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--videos-csv", type=Path, default=Path("data/videos.csv"))
+    p.add_argument("--downloads-dir", type=Path, default=Path("Downloads"))
+    p.add_argument("--output-dir", type=Path, default=Path("data/npy_filled"))
+    p.add_argument("--yolo-weights", type=Path, default=Path("yolov8n.pt"))
+    p.add_argument("--window", type=int, default=48)
+    p.add_argument("--k-max", type=int, default=4)
+    p.add_argument("--min-frame-frac", type=float, default=0.25)
+    return p.parse_args()
 
 
-def main() -> None:
+def main():
     args = parse_args()
-    videos_csv = args.videos_csv
-    downloads_dir = args.downloads_dir
-    output_dir = args.output_dir
-    output_dir.mkdir(parents=True, exist_ok=True)
+    out = args.output_dir
+    out.mkdir(parents=True, exist_ok=True)
 
-    if not videos_csv.exists():
-        raise FileNotFoundError(f"No se encontró {videos_csv}")
-
-    logging.info("Leyendo %s", videos_csv)
-    df_videos = pd.read_csv(videos_csv)
-
-    logging.info("Cargando YOLOv8 desde %s", args.yolo_weights)
+    df = pd.read_csv(args.videos_csv)
     model = YOLO(str(args.yolo_weights))
     pose = mp.solutions.pose.Pose(static_image_mode=True)
 
-    total_windows = 0
-    for _, row in df_videos.iterrows():
-        total_windows += process_scene(
+    total = 0
+    for _, row in df.iterrows():
+        total += process_scene(
             row=row,
-            downloads_dir=downloads_dir,
-            output_dir=output_dir,
+            downloads=args.downloads_dir,
+            outdir=out,
             model=model,
-            pose_estimator=pose,
+            pose=pose,
             window=args.window,
             k_max=args.k_max,
+            min_frame_frac=args.min_frame_frac,
         )
 
-    logging.info("Listo. Ventanas generadas: %d", total_windows)
+    logging.info("LISTO. Ventanas generadas: %d", total)
 
 
 if __name__ == "__main__":

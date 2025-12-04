@@ -43,6 +43,9 @@ except Exception as e:
     print('Error importing MPGCN from 01-replica-paper/MP-GCN:', e)
     raise
 
+# target node count (set at runtime after loading adjacency)
+TARGET_V = None
+
 
 def find_adj_files(stem_path: Path):
     # returns tuple A0, A_intra, A_inter paths if present
@@ -94,7 +97,19 @@ def collate_fn(batch):
     ys = torch.tensor([b['y'] for b in batch], dtype=torch.long)
     ws = torch.tensor([b['w'] for b in batch], dtype=torch.float32)
     # ensure shapes align: (C,T,V,M) -> add I=1 and batch
-    Xs_t = [torch.from_numpy(x).unsqueeze(0) for x in Xs]
+    # pad or trim V dimension to global TARGET_V when set so adjacency and X match
+    global TARGET_V
+    Xs_t = []
+    for x in Xs:
+        # x: numpy (C,T,V,M)
+        C, T, V, M = x.shape
+        if TARGET_V is not None and V != TARGET_V:
+            if V < TARGET_V:
+                pad = np.zeros((C, T, TARGET_V - V, M), dtype=x.dtype)
+                x = np.concatenate([x, pad], axis=2)
+            else:
+                x = x[:, :, :TARGET_V, :]
+        Xs_t.append(torch.from_numpy(x).unsqueeze(0))
     Xb = torch.stack(Xs_t, dim=0)  # (B, I=1, C, T, V, M)
     return Xb, ys, ws
 
@@ -203,18 +218,51 @@ def main():
     train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, collate_fn=collate_fn)
     val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=max(1, args.num_workers//2), collate_fn=collate_fn)
 
-    # build A from first training sample to create model (assumes consistent graph sizes)
-    sample_fname = train_df.iloc[0]['file']
-    A_stack = build_A_from_sample(graph_dir, sample_fname)
+    # Select a representative training sample for adjacency/X shape inference.
+    # Different windows may include different numbers of objects (Vp). To avoid
+    # mismatches we pick the training sample whose adjacency `_A0.npy` has the
+    # largest node count and use it to construct A_stack and infer X shape.
+    max_vp = -1
+    chosen_sample = None
+    for fname in train_df['file'].tolist():
+        try:
+            cand_a0, _, _ = find_adj_files(Path(fname))
+            cand_path = graph_dir / cand_a0.name
+            if not cand_path.exists():
+                cand_path = graph_dir / (Path(fname).stem + '_A0.npy')
+            if not cand_path.exists():
+                cand_path = graph_dir / (Path(fname).name + '_A0.npy')
+            if not cand_path.exists():
+                # try removing trailing '_X' if present
+                name_no_x = Path(fname).stem
+                if name_no_x.endswith('_X'):
+                    cand_path = graph_dir / (name_no_x[:-2] + '_A0.npy')
+            if not cand_path.exists():
+                continue
+            A0_tmp = np.load(cand_path)
+            vp = int(A0_tmp.shape[0])
+            if vp > max_vp:
+                max_vp = vp
+                chosen_sample = fname
+        except Exception:
+            continue
 
-    # inspect one sample X to know shapes. Resolve filename variants as in dataset.
-    sample_path = graph_dir / sample_fname
+    if chosen_sample is None:
+        chosen_sample = train_df.iloc[0]['file']
+
+    A_stack = build_A_from_sample(graph_dir, chosen_sample)
+    # ensure global TARGET_V equals adjacency node count so X tensors can be padded/trimmed
+    global TARGET_V
+    TARGET_V = int(A_stack.shape[1])
+
+    # inspect the X file corresponding to the chosen sample for shape inference
+    sample_path = graph_dir / chosen_sample
     if not sample_path.exists():
-        alt = graph_dir / (Path(sample_fname).stem + '_X.npy')
+        alt = graph_dir / (Path(chosen_sample).stem + '_X.npy')
         if alt.exists():
             sample_path = alt
         else:
-            alt2 = graph_dir / (Path(sample_fname).name + '_X.npy')
+            alt2 = graph_dir / (Path(chosen_sample).name + '_X.npy')
             if alt2.exists():
                 sample_path = alt2
     if not sample_path.exists():
@@ -222,6 +270,9 @@ def main():
     sample_X = np.load(sample_path)
     # sample_X shape: (C, T, V, M)
     C, T, V, M = sample_X.shape
+    # if TARGET_V set from adjacency, prefer that for model data_shape
+    if TARGET_V is not None:
+        V = TARGET_V
     data_shape = (1, C, T, V, M)
 
     num_classes = len(le.classes_)

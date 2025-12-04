@@ -32,14 +32,24 @@ def ensure_window(arr: np.ndarray) -> np.ndarray:
 def render_window(window: np.ndarray, out_path: Path, image_size=256):
     # window: (T, K, V=17, 2)
     T, K, V, _ = window.shape
-    # Prefer the first non-empty frame; fall back to central frame
-    frame_idx = None
+
+    def _count_visible_joints(frame: np.ndarray) -> int:
+        # frame: (K, V, 2) -> count joints visible in at least one person
+        vis = 0
+        for v in range(frame.shape[1]):
+            if np.any(np.linalg.norm(frame[:, v, :], axis=1) > 0):
+                vis += 1
+        return vis
+
+    # Choose frame: prefer the one with the most visible joints (heuristic)
+    best_idx = 0
+    best_vis = -1
     for t in range(T):
-        if not np.allclose(window[t], 0):
-            frame_idx = t
-            break
-    if frame_idx is None:
-        frame_idx = T // 2
+        vis = _count_visible_joints(window[t])
+        if vis > best_vis:
+            best_vis = vis
+            best_idx = t
+    frame_idx = best_idx
     frame = window[frame_idx]
 
     img = Image.new('RGB', (image_size, image_size), (255,255,255))
@@ -63,6 +73,7 @@ def render_window(window: np.ndarray, out_path: Path, image_size=256):
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     img.save(out_path)
+    return best_vis
 
 
 def main():
@@ -70,6 +81,7 @@ def main():
     parser.add_argument('--in-dir', type=Path, default=Path('Playground/data/npy'))
     parser.add_argument('--out-dir', type=Path, default=Path('Playground/data/graph/with_objects/frames'))
     parser.add_argument('--ext', type=str, default='.npy')
+    parser.add_argument('--min-joints', type=int, default=12, help='mínimo de joints visibles (de 17) para incluir la ventana')
     args = parser.parse_args()
 
     in_dir = args.in_dir
@@ -77,7 +89,8 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     candidate_txt = out_dir.parent / 'candidate_frames.txt'
-    with candidate_txt.open('w') as ftxt:
+    skipped_txt = out_dir.parent / 'candidate_frames_skipped.txt'
+    with candidate_txt.open('w') as ftxt, skipped_txt.open('w') as fskip:
         for npy in sorted(in_dir.glob(f'*{args.ext}')):
             try:
                 arr = np.load(npy)
@@ -88,11 +101,15 @@ def main():
             img_name = npy.stem + '.png'
             out_img = out_dir / img_name
             try:
-                render_window(window, out_img)
-                ftxt.write(f"{npy}\t{out_img}\n")
+                vis = render_window(window, out_img)
+                if vis >= args.min_joints:
+                    ftxt.write(f"{npy}\t{out_img}\t{vis}\n")
+                else:
+                    fskip.write(f"{npy}\t{out_img}\t{vis}\n")
             except Exception as e:
                 print('Failed rendering', npy, e)
     print('Wrote candidate list to', candidate_txt)
+    print('Wrote skipped list to', skipped_txt)
 
 
 if __name__ == '__main__':

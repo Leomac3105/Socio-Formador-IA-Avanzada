@@ -46,9 +46,22 @@ def main():
     with open(candidate) as f, open(out_csv, 'w', newline='') as fout:
         writer = csv.writer(fout)
         writer.writerow(['file','label','conf_weight'])
-        for line in f:
-            npy_path, img_path = line.strip().split('\t')
-            img = Image.open(img_path).convert('RGB')
+        for lineno, line in enumerate(f, start=1):
+            parts = line.strip().split('\t')
+            if len(parts) < 2:
+                print(f"Skipping malformed line {lineno} in {candidate}: '{line.strip()}'")
+                continue
+            npy_path, img_path = parts[0], parts[1]
+            img_path_p = Path(img_path)
+            if not img_path_p.exists():
+                alt = repo_root / img_path
+                if alt.exists():
+                    img_path_p = alt
+            try:
+                img = Image.open(img_path_p).convert('RGB')
+            except Exception as e:
+                print(f"Failed to open image for line {lineno}: {img_path_p} ({e})")
+                continue
             inputs = processor(text=LABELS, images=img, return_tensors='pt', padding=True).to(device)
             with torch.no_grad():
                 logits_per_image = model(**inputs).logits_per_image
