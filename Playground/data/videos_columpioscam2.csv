@@ -1,0 +1,6 @@
+video_id,camera,t_start,t_end,blob_path,n_detections
+columpioscam2-2024-12-09_18-02-00.mp4,urn:ngsi-ld:camera:columpiosCam2,2024-12-09T18:02:00+00:00,2024-12-09T18:02:20.150000+00:00,columpioscam2-2024-12-09_18-02-00.mp4,1150
+columpioscam2-2024-12-17_10-52-00.mp4,urn:ngsi-ld:camera:columpiosCam2,2024-12-17T10:52:00+00:00,2024-12-17T10:52:21.980000+00:00,columpioscam2-2024-12-17_10-52-00.mp4,1235
+columpioscam2-2024-12-14_17-54-00.mp4,urn:ngsi-ld:camera:columpiosCam2,2024-12-14T17:54:00+00:00,2024-12-14T17:54:18.440000+00:00,columpioscam2-2024-12-14_17-54-00.mp4,1088
+columpioscam2-2024-12-13_09-42-00.mp4,urn:ngsi-ld:camera:columpiosCam2,2024-12-13T09:42:00+00:00,2024-12-13T09:42:15.200000+00:00,columpioscam2-2024-12-13_09-42-00.mp4,980
+columpioscam2-2024-12-14_18-22-00.mp4,urn:ngsi-ld:camera:columpiosCam2,2024-12-14T18:22:00+00:00,2024-12-14T18:22:25.510000+00:00,columpioscam2-2024-12-14_18-22-00.mp4,1310
