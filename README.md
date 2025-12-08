@@ -1,88 +1,210 @@
-# Reto — Escenas de playground usando **MP-GCN** 
+# RESUMEN Portafolio de anális
+## Indicadores de Privacidad, Anonimización y Control de Acceso a Datos
+---
 
-## ¿Qué haremos y por qué?
-
-Clasificar **una etiqueta por escena** en escenas de playground (`Transit`, `Social_People`, `Play_Object_Normal`, `Play_Object_Risk`, `Adult_Assisting`, `Negative_Contact`) usando **esqueletos 2D** y un **grafo panorámico** persona–objeto (**MP-GCN**).
-MP-GCN modela **interacciones**: *intra-persona* (topología del cuerpo), *persona↔objeto* (manos↔columpio/lomas) y *inter-persona* (pelvis↔pelvis). Es **ligero**, **privado** y capta mejor **riesgo/uso del mobiliario** que un modelo por-persona con atención.
-
-* **Repo de referencia:** [MP-GCN](https://github.com/mgiant/MP-GCN) 
-* **Paper:** ["Skeleton-based Group Activity Recognition via Spatial-Temporal Panoramic Graph"](https://link.springer.com/chapter/10.1007/978-3-031-73202-7_15)
+## Síntesis General
+| # | Indicador | Estado | Cumplimiento |
+|---|-----------|--------|--------------|
+| 1 | Trabaja con grandes volúmenes de datos | **SE CUMPLE** | 1.5M registros BD + 21 videos + miles de esqueletos |
+| 2 | Verifica anonimización de datos | **SE CUMPLE** | UUIDs + keypoints sin rostro + normalización + CLIP |
+| 3 | Especifica procesos y estándares | **SE CUMPLE** | Auth/Autorización + filtrado espacial + validación confianza |
+| 4 | Presenta registros de auditoría | **SE CUMPLE** | Logs + CSVs + manifests con trazabilidad completa |
 
 ---
 
-## Reglas prácticas 
+## Hallazgos Principales
 
-* **FPS de proceso:** 12 → **T**≈60 (muestrea a **T=48** para el modelo)
-* **K\_max personas por ventana:** 4
-* **Forma de entrada (feeder estilo ST-GCN/MP-GCN):** `X ∈ [C, T, V', M]`
+### INDICADOR 1: Volúmenes de Datos Masivos
 
-  * `V' = 17 + n_obj` (joints humanos + **centroides** de objetos por cámara)
-  * **Streams:** `J` (joints), `B` (bones), `JM=ΔJ`, `BM=ΔB`
-  * **Adyacencias:** `A0` (self), `A_intra` (humano + **obj↔manos**), `A_inter` (**pelvis↔pelvis**)
+**Donde se cumple:**
 
----
+- **Base de Datos PostGIS:** 1,592,490 registros de personas en el parque infantil
+- **Almacenamiento Azure Blob:** 21 videos de múltiples cámaras
+- **Esqueletos procesados:** Miles de puntos articulares (17 por persona)
+- **Grafos generados:** Matrices de adyacencia panorámica
 
-## Plan sugerido
-
-### ✅ **Réplica el paper (3 semanas)**
-
-**Objetivo:** entender MP-GCN y su *feeder* antes de tocar nuestro dato.
-
-* Leer el **paper** (idea del grafo, 4 streams) y el **README** del repo.
-* Clonar repo, crear ambiente e **instalar** dependencias.
-* **Preparar** un dataset público (Volleyball / NBA; opcional **Kinetics-400** vía `pyskl`) como indica el repo.
-* **Entrenar o inferir** con el *config* del repo y **reportar** Top-1/matriz de confusión.
-* **Entender shapes** del *feeder* (`[C,T,V',M]`) e imprimirlos en un notebook.
-
-**Entregables**
-
-* Notebook “hello\_mpgcn.ipynb” (instalación + inferencia/entreno corto + shapes)
+**Archivos clave:**
+```
+✓ reading-db.ipynb (BD PostGIS con ST_Intersects)
+✓ Playground/data/videos.csv (21 videos catalogados)
+✓ Playground/data/npy/*.npy (esqueletos normalizados)
+✓ Playground/data/graph/ (grafos con objetos)
+```
 
 ---
 
-### ✅ Pipeline Playground (3 semanas)**
+### INDICADOR 2: Anonimización de Datos
 
-**Objetivo:** construir los **inputs panorámicos** a partir de nuestros videos.
+**Mecanismos implementados:**
 
-* **Filtrar videos** (ROI) usando el notebook de la base de datos (PostGIS) y **seleccionar ≥100 escenas**:
-  `video_id,camera,t_start,t_end,blob_path`
+1. **UUIDs en Base de Datos**
+   - Campo `id_person`: UUID v4 aleatorio (ej: `b17e1ad8-0c2c-44e4-ba72-54c2dd3881a4`)
+   - Ningún nombre, rostro o dato biométrico identificable
 
-  > Puedes **prefiltrar** con el **VLM** y/o con el **# de detecciones** de la DB.
-* **Esqueletos + tracking ligero** (YOLO/RTM-pose + ByteTrack/DeepSORT) en esas ventanas; **normalizar** por persona (cadera al origen, escala por torso).
-  Guardar por ventana: **`[T,K_max,17,2]`**.
-* **Objetos por cámara**: anotar manualmente **centroides** (0..1) de columpios/lomas en `configs/objects.yaml`.
-* **Grafo panorámico**:
+2. **Extracción de Esqueletos sin Rostro**
+   - YOLOv8 para detección de cuerpo (no rostro)
+   - MediaPipe Pose: 17 keypoints de articulaciones
+   - **Sin información facial**
 
-  * Expandir **`V → V' = 17 + n_obj`** (replicar centroides por frame/persona)
-  * Añadir aristas **obj↔manos** (intra) y **pelvis↔pelvis** (inter)
-  * Generar **`J/B/JM/BM`** y matrices **`A0/A_intra/A_inter`**
-  * **Probar un forward** con el *feeder* del repo (batch pequeño)
+3. **Normalización de Postura**
+   - Traslación: pelvis → origen (0,0)
+   - Escala: torso normalizado a 1
+   - Resultado: coordenadas relativas [0,1]
 
-**Entregables**
+4. **Almacenamiento Anonimizado**
+   - Arrays NumPy: solo valores numéricos
+   - Shape: (T=48, K_max=4, 17 articulaciones, 2 coords)
+   - **Sin metadatos identificables**
 
-* `data/videos.csv` (≥100 filas)
-* `data/npy/*.npy` o `.npz` por ventana (`[T,K_max,17,2]` normalizados)
-* `configs/objects.yaml` (centroides por cámara)
-* Script/función **`build_panoramic_graph`** y evidencia de **forward OK**
+5. **Etiquetado Automático CLIP**
+   - Clasifica comportamiento desde esqueletos
+   - No tiene acceso a rostros o identidades
+   - Etiquetas: Transit, Social, Play Normal/Risk, Adult, Negative Contact
 
----
-
-### ✅ **Etiquetado, entrenamiento y resultados (4 semanas)**
-
-**Objetivo:** adaptar MP-GCN a playground y mostrar valor del grafo persona–objeto.
-
-* **Etiquetado automático con VLM** → *scores por clase* → **argmax**; guardar `conf_weight = score_max` y aplicar **CORE-CLEAN** (p. ej., `score ≥ 0.8`).
-  *(Si no usan VLM: curado humano ligero de 3–5 clases clave).*
-* **Entrenamiento ligero**: congelar gran parte del backbone y entrenar cabezas/capas.
-
-
-**Entregables**
-
-* `train.csv` / `val.csv` (single-label; si VLM: con `conf_weight`)
-* Checkpoint + **métricas**
-* **Reporte** (2–4 páginas)
+**Archivos clave:**
+```
+✓ Playground/scripts/extract_skeletons.py (normalización)
+✓ Playground/data/npy/*.npy (esqueletos anonimizados)
+✓ Playground/scripts/label_with_clip.py (etiquetado anónimo)
+```
 
 ---
 
+### INDICADOR 3: Procesos y Estándares de Validación
 
+**Estándares implementados:**
 
+| Proceso | Estándar | Validación |
+|---------|----------|-----------|
+| **Autenticación BD** | User + IP privada (40.84.231.179:5434) | VNet exclusiva Azure |
+| **Autorización Azure** | SAS Token con expiración (2026-04-02) | HTTPS obligatorio |
+| **Filtrado Espacial** | ST_Intersects con playgroundROI.gpkg | Solo datos dentro del parque |
+| **Normalización** | Función determinística `normalize_skeleton()` | Pelvis=origen, torso=1 |
+| **Confianza de Etiquetas** | Umbral `--min-conf 0.6` | Descarta baja calidad |
+| **Reproducibilidad** | `random_state=42` | Splits consistentes |
+| **Validación de Grafos** | Config por cámara (objects.yaml) | Centroides normalizados [0,1] |
+
+**Archivos clave:**
+```
+✓ reading-db.ipynb (auth + autorización)
+✓ playgroundROI.gpkg (filtrado espacial)
+✓ extract_skeletons.py (normalización)
+✓ filter_and_split_labels.py (confianza + reproducibilidad)
+✓ build_panoramic_graph.py (validación grafos)
+```
+
+---
+
+### INDICADOR 4: Registros de Auditoría
+
+**Registros implementados:**
+
+1. **Conexión Base de Datos**
+   - Ubicación: `reading-db.ipynb`
+   - Salida: "Total dentro del ROI: 1,592,490"
+   - Evidencia: Query documentada con parámetros
+
+2. **Descargas de Azure**
+   - Ubicación: `reading-db.ipynb`
+   - Salida: "Downloading {blob_path}"
+   - Evidencia: Progress bar + destino documentado
+
+3. **Extracción de Esqueletos**
+   - Ubicación: `extract_skeletons.py`
+   - Salida: Logging INFO en consola
+   - Evidencia: Archivos .npy generados con nombre único
+
+4. **Etiquetado Automático**
+   - Archivo: `vlm_labels_clip.csv`
+   - Contenido: file, label, conf_weight
+   - Evidencia: 3 columnas de trazabilidad
+
+5. **Filtrado por Confianza**
+   - Archivo: `vlm_labels_filtered_0.60.csv`
+   - Contenido: Todas las muestras ≥ conf
+   - Evidencia: Logs de entrada/salida
+
+6. **Exclusiones de Baja Confianza**
+   - Archivo: `vlm_labels_lowconf_below_0.60.csv`
+   - Contenido: Muestras rechazadas
+   - Evidencia: Disponibles para auditoría
+
+7. **Split Entrenamiento/Validación**
+   - Archivos: `train.csv` (80%), `val.csv` (20%)
+   - Contenido: Stratified por clase
+   - Evidencia: Reproducible con `random_state=42`
+
+**Archivos clave:**
+```
+✓ reading-db.ipynb (conexión + descargas)
+✓ extract_skeletons.py (extracción)
+✓ label_with_clip.py (etiquetado)
+✓ filter_and_split_labels.py (filtrado)
+✓ Playground/data/graph/with_objects/ (CSVs de auditoría)
+```
+
+---
+## Matriz de Control de Acceso
+
+```
+NIVEL 1: AUTENTICACIÓN
+├─ PostGIS: user/password + IP whitelist
+├─ Azure: SAS Token (limitado, con expiración)
+└─ Sistema de Archivos: Permisos OS
+
+NIVEL 2: AUTORIZACIÓN
+├─ PostGIS: Usuario admin con lectura
+├─ Azure: Token solo para contenedor 'crowdcounting'
+└─ Sistema: Grupo de proyecto
+
+NIVEL 3: ANONIMIZACIÓN
+├─ BD: UUIDs en lugar de nombres
+├─ Keypoints: Solo articulaciones, sin rostro
+├─ Normalización: Coordenadas relativas [0,1]
+└─ CLIP: Clasifica comportamiento, no identidad
+
+NIVEL 4: AUDITORÍA
+├─ Logs de conexión
+├─ Manifests de descargas
+├─ CSVs de etiquetado
+├─ Registros de filtrado
+└─ Splits reproducibles
+```
+
+---
+### 1. **INDICADORES_PRIVACIDAD_Y_ANONIMIZACION.md**
+   - Descripción detallada de cada indicador
+   - Ubicaciones exactas en el código
+   - Implementación técnica
+   - Ejemplos de código
+   - 480+ líneas de documentación
+
+### 2. **MATRIZ_TRAZABILIDAD_PRIVACIDAD.md**
+   - Tabla de componentes vs. volúmenes
+   - Matriz de anonimización por capa
+   - Estándares y validaciones
+   - Tabla de registros de auditoría
+   - Matriz de control de acceso visual
+---
+
+## Conclusiones
+
+### Cumplimiento Integral
+
+El proyecto cumple con los siguientes indicadores:
+
+1. **Grandes volúmenes:** 1.5M registros + 21 videos + miles de esqueletos
+2. **Anonimización:** UUIDs + keypoints sin rostro + normalización + CLIP
+3. **Estándares:** Auth, autorización, filtrado, validación, reproducibilidad
+4. **Auditoría:** Logs, CSVs, manifests con trazabilidad completa
+
+---
+
+## Ubicación de Archivos
+
+Ambos documentos están disponibles en:
+```
+c:\Users\edosa\Documents\Uni\7to\Reto\R2\Socio-Formador-IA-Avanzada\
+├─ INDICADORES_PRIVACIDAD_Y_ANONIMIZACION.md (documentación completa)
+└─ JUSTIFIACION_PRIVACIDAD_DATOS.md (Razón de vulnerabilidades)
+```
