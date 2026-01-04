@@ -1,0 +1,159 @@
+\documentclass{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{hyperref}
+\usepackage{enumitem}
+
+\title{Reporte Final — Proyecto Socio-Formador IA Avanzada}
+\author{Equipo Parlay}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Introducción}
+
+El análisis automático de actividades humanas en espacios públicos representa un desafío significativo dentro del campo de la visión computacional. Factores como la variabilidad del entorno, las condiciones de iluminación, la presencia simultánea de múltiples personas, la oclusión parcial y la calidad irregular del video dificultan la obtención de modelos robustos capaces de interpretar interacciones en escenarios reales.
+
+En este proyecto, desarrollado por el equipo \textbf{Parlay}, se diseñó e implementó un sistema completo para detectar y clasificar actividades humanas en un parque. El objetivo principal fue identificar interacciones entre personas y elementos del mobiliario urbano —particularmente columpios— mediante un pipeline basado en visión por computadora, extracción de esqueletos y modelos de grafos.
+
+El resultado final integra detección de personas, estimación de poses, normalización espacial, construcción de grafos dinámicos y clasificación mediante el modelo MP-GCN. El sistema reconoce tres actividades principales: \emph{Play\_Object\_Normal}, \emph{Play\_Object\_Risk} y \emph{Transit}. 
+
+Este documento describe la metodología completa, los experimentos realizados y los resultados obtenidos.
+
+\section{Metodología}
+
+\subsection{Descarga y preparación del dataset}
+
+Los videos originales fueron descargados automáticamente desde Azure Blob Storage, organizados por fecha y cámara. Debido a la naturaleza del parque, muchos clips contenían poca o nula actividad relevante, por lo que se incorporó un filtrado preliminar apoyado en detecciones rápidas de personas. Los videos sin presencia humana o con actividad mínima fueron descartados para optimizar el procesamiento posterior.
+
+Todos los videos fueron muestreados a aproximadamente 12 fps, lo cual ofreció un equilibrio adecuado entre estabilidad temporal y eficiencia computacional. Cada secuencia se dividió en ventanas temporales de 48 fotogramas, que posteriormente se utilizaron como unidades de análisis para todo el pipeline.
+
+\subsection{Extracción de esqueletos}
+
+Para cada fotograma dentro de las ventanas:
+
+\begin{itemize}
+    \item Se aplicó YOLOv8 para detectar personas y obtener sus bounding boxes.
+    \item Para cada detección, se extrajo un conjunto de 17 puntos clave usando MediaPipe Pose.
+    \item Los puntos clave fueron normalizados trasladando la pelvis al origen y escalando el esqueleto en función de la distancia torso-hombros.
+\end{itemize}
+
+Esta normalización permitió reducir la variabilidad entre personas de diferentes tamaños y asegurar coherencia espacial entre ventanas.
+
+Cada ventana se representó como un tensor de dimensiones:
+
+\[
+T \times K \times 17 \times 2
+\]
+
+donde \(T = 48\) fotogramas, \(K \leq 4\) personas por ventana, 17 articulaciones y 2 coordenadas por articulación.
+
+\subsection{Construcción del grafo persona–objeto}
+
+Cada escena se modeló como un grafo dinámico donde:
+
+\begin{itemize}
+    \item Los nodos representan articulaciones humanas y objetos relevantes del parque.
+    \item Las aristas representan relaciones espaciales entre articulaciones, así como vínculos entre personas y objetos cercanos.
+\end{itemize}
+
+Este enfoque permite codificar tanto información estática (posturas) como dinámica (movimiento a lo largo del tiempo). El modelo también incorpora interacciones persona–objeto, esenciales para distinguir entre actividades relacionadas con columpios y simples desplazamientos.
+
+\subsection{Arquitectura y entrenamiento del MP-GCN}
+
+El modelo de clasificación empleado fue MP-GCN, una arquitectura basada en convoluciones sobre grafos capaz de integrar información espacial y temporal.
+
+Debido a restricciones computacionales, se adoptó una estrategia de entrenamiento ligera:
+
+\begin{itemize}
+    \item Se reutilizó el backbone del modelo original.
+    \item Se congelaron las primeras capas, entrenando únicamente las capas finales.
+    \item Se usó un batch size reducido.
+    \item El entrenamiento se realizó durante 10–20 épocas.
+\end{itemize}
+
+La función de pérdida utilizada fue \emph{cross entropy}, optimizada mediante Adam.
+
+\section{Experimentos}
+
+El sistema se evaluó clasificando ventanas de video en tres categorías:
+
+\begin{enumerate}
+    \item \textbf{Play\_Object\_Normal}: Interacción segura con el objeto.
+    \item \textbf{Play\_Object\_Risk}: Comportamientos intensos o riesgosos.
+    \item \textbf{Transit}: Personas pasando o caminando sin interacción.
+\end{enumerate}
+
+Se construyó una matriz de confusión para analizar los errores del modelo y se calcularon métricas de desempeño estándar como exactitud y distribución de aciertos por clase.
+
+\section{Resultados}
+
+El modelo alcanzó una exactitud aproximada del \textbf{75\%}. Los principales hallazgos incluyen:
+
+\begin{itemize}
+    \item La clase \textbf{Play\_Object\_Risk} fue la mejor reconocida, indicando que el modelo es sensible a patrones de movimiento más intensos.
+    \item La clase \textbf{Play\_Object\_Normal} presentó confusiones con \textbf{Transit}, especialmente en casos donde la actividad del columpio era mínima.
+    \item El pipeline completo —detección, esqueletos, grafos y clasificación— permitió capturar de manera efectiva la dinámica temporal de las actividades en el parque.
+\end{itemize}
+
+La matriz de confusión evidenció una separación clara entre actividades estáticas y dinámicas, lo que confirma que el enfoque basado en grafos y esqueletos es adecuado para este tipo de problemas.
+
+\section{Conclusiones}
+
+El sistema desarrollado demuestra que es posible reconocer actividades humanas en entornos reales utilizando un pipeline basado en visión computacional y modelos de grafos. La representación mediante esqueletos y la integración de relaciones persona–objeto resultaron fundamentales para obtener un desempeño sólido, especialmente en actividades que involucran mobiliario urbano.
+
+Si bien existen áreas de mejora —como refinar el etiquetado o aumentar la diversidad del dataset— los resultados muestran que MP-GCN es capaz de capturar interacciones complejas a partir de secuencias de esqueletos.
+
+\subsection{Conclusiones individuales}
+
+\subsubsection*{Edwin Iñiguez Moncada}
+
+A lo largo del desarrollo de este proyecto pude consolidar y ampliar significativamente mis conocimientos en visión por computadora, procesamiento de datos y construcción de modelos basados en grafos. El trabajo que realicé en la selección y filtrado inicial de los videos me permitió comprender la importancia del preprocesamiento en pipelines de IA y cómo la calidad y relevancia de los datos condicionan directamente el desempeño del modelo. Asimismo, el diseño y la implementación del sistema de extracción de esqueletos y su conversión a grafos fue uno de los aprendizajes más valiosos, ya que me enfrentó a retos como la normalización espacial, el manejo de secuencias incompletas y la estandarización temporal de ventanas.
+
+\subsubsection*{Leonardo Gutiérrez}
+
+En este reto me di cuenta de lo retador que es llevar la visión computacional a un entorno real, con videos ruidosos, personas que entran y salen de cuadro y actividades que no siempre son tan claras como en los ejemplos de laboratorio. Trabajar con esqueletos, grafos y el modelo MP-GCN me ayudó a entender mejor cómo combinar información espacial y temporal para reconocer actividades humanas de forma más robusta. También confirmé que gran parte del éxito del modelo no está solo en la arquitectura, sino en el preprocesamiento, el filtrado de videos y el etiquetado cuidadoso de las ventanas. Aunque aún hay áreas claras de mejora, como aumentar y balancear el dataset, me quedo con la sensación de que construimos un pipeline sólido y escalable que puede seguir refinándose en futuras iteraciones.
+
+\subsubsection*{Carlos Sánchez}
+
+A lo largo del proyecto pude profundizar en el diseño e implementación de pipelines completos de visión por computadora, desde la extracción de información cruda del video hasta la generación de predicciones con un modelo basado en grafos. Uno de los aprendizajes más significativos fue comprender cómo los errores tempranos —como esqueletos incompletos, variabilidad entre personas o secuencias mal alineadas— afectan directamente el desempeño de modelos avanzados como MP-GCN. Esta experiencia me permitió entender la importancia de validar exhaustivamente cada etapa previa antes de entrenar cualquier modelo, así como la necesidad de comunicar hallazgos y problemas de forma clara dentro del equipo.
+
+\subsubsection*{Álvaro Solano González}
+
+Al inicio del proyecto subestimé considerablemente la magnitud del trabajo necesario para construir un pipeline funcional de visión computacional. Pensé que las etapas principales serían relativamente directas, pero conforme avanzamos descubrimos lo complejo que es integrar detección, extracción de esqueletos, normalización temporal, construcción de grafos y clasificación en un solo sistema coherente. Esta experiencia me llevó a valorar mucho más la importancia del diseño modular, la depuración cuidadosa y el análisis detallado de cada etapa del flujo de procesamiento.
+
+A lo largo del reto pude fortalecer mis conocimientos en manipulación de datos, limpieza de secuencias y validación de la información generada por los modelos. También aprendí lo crítico que es entender a profundidad por qué fallan ciertas ventanas, cómo detectar inconsistencias en los esqueletos y cómo resolver bugs que, aunque pequeños, pueden degradar el rendimiento completo del sistema. Además, participar activamente en la integración final del pipeline y en la preparación de los experimentos me permitió comprender mejor cómo un error en cualquiera de las etapas afecta directamente el entrenamiento y la evaluación del MP-GCN.
+
+En general, este proyecto representó para mí un reto técnico y organizacional. Me enseñó a trabajar con mayor disciplina, a pedir ayuda cuando era necesario y a colaborar de forma más efectiva con mi equipo para avanzar hacia un resultado común. Termino el proyecto con una comprensión mucho más sólida de los modelos basados en grafos, del flujo completo de visión computacional y del valor de un pipeline bien diseñado.
+
+\subsection{Contribución de cada integrante}
+
+\begin{itemize}
+    \item \textbf{Edwin Iñiguez Moncada}: Filtrado y selección de videos; preprocesamiento de datos; creación del pipeline; diseño e implementación del extractor de esqueletos; conversión esqueleto–grafo; manejo de frames faltantes; etiquetado; entrenamiento inicial del modelo MP-GCN; optimizaciones de procesamiento.
+    \item \textbf{Leonardo Gutiérrez}: Implementación del renderizado de ventanas; apoyo en validación de esqueletos; etiquetado automático; análisis del dataset; generación de estadísticas; depuración de ventanas problemáticas.
+    \item \textbf{Carlos Sánchez}: Implementación y prueba de entrenamiento del MP-GCN; análisis de matriz de confusión; evaluación de métricas; investigación de ajustes para el modelo; documentación técnica.
+    \item \textbf{Álvaro Solano González}: Integración general del pipeline; pruebas de extracción; verificación de datos; automatización de scripts; revisión de outputs; apoyo en diseño de la presentación final; consolidación del reporte.
+\end{itemize}
+
+\section{Bibliografía}
+
+\begin{thebibliography}{9}
+
+\bibitem{mpgcn}
+Zhao, Y., Li, Y., Wang, S., et al.  
+\textit{MP-GCN: A Multi-Perspective Graph Convolutional Network for Skeleton-Based Action Recognition}. CVPR, 2021.
+
+\bibitem{yolov8}
+Jocher, G.  
+\textit{Ultralytics YOLOv8}. 2023.
+
+\bibitem{mediapipe}
+Lugaresi, C. et al.  
+\textit{MediaPipe: A Framework for Building Perception Pipelines}. Google Research, 2019.
+
+\end{thebibliography}
+
+\end{document}
